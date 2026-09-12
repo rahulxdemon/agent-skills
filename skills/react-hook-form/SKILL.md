@@ -15,8 +15,9 @@ description:
 
 How to write forms that stay correct as they grow. The existing codebase is **not**
 a safe reference: `form.watch()` off prop-drilled form objects, watches,
-unguarded `valueAsNumber`, and `?? undefined` controlled values are all
-common in older code and all wrong. Follow this skill, not the neighboring file.
+unguarded `valueAsNumber`, `?? undefined` controlled values, and raw `register()`
+spread onto plain `<input>`s are all common in older code and all wrong. Follow
+this skill, not the neighboring file.
 
 **Policy — fix what you touch.** New code must follow these rules. When you modify
 existing form code, upgrade the specific fields/hooks/components you're editing to
@@ -25,6 +26,65 @@ match (e.g. a component you touch that calls `form.watch` gets converted to
 noticed and didn't fix. Never add new violations: `react-hook-form/no-use-watch`
 is ratcheted in Studio CI — any increase in the warning count fails the build.
 
+## Always wire fields with `Controller` — never bare `register`, never `FormField`
+
+Every field in this codebase is a controlled component wired through RHF's
+`Controller` render prop directly. **Never spread `register('name')` onto a raw
+`<input>`** as a shortcut — it bypasses the `field`/`fieldState` contract every
+other rule in this skill depends on (empty-string sentinels, `fieldState.invalid`,
+scoped re-renders) and is invisible to `no-use-watch`/dirty-state tooling built
+around `Controller`. If you see bare `register(...)` in a diff you're touching,
+convert it.
+
+This also means: don't reach for the shadcn `Form`/`FormField`/`FormItem`/
+`FormControl`/`FormLabel`/`FormMessage` context wrapper, even though it also
+wraps `Controller` internally. This codebase standardizes on explicit
+`Controller` + `Field`/`FieldGroup` (below) — if you find `Form`/`FormField` in
+a file you're touching, convert it to match.
+
+```tsx
+// ❌ never do this
+<input {...form.register('email')} />
+
+// ✅ minimum acceptable wiring
+<Controller
+  control={form.control}
+  name="email"
+  render={({ field, fieldState }) => (
+    <Input {...field} aria-invalid={fieldState.invalid} />
+  )}
+/>
+```
+
+## Field wiring: `Field` / `FieldGroup` + explicit `Controller`
+
+Every field is wrapped in `<Field>` inside a `<FieldGroup>`, with an explicit
+`Controller` per field — no `FormProvider`/context. `fieldState` comes straight
+off the render prop and is passed to `FieldError` explicitly, right next to the
+`field` it belongs to:
+
+```tsx
+<FieldGroup>
+  <Controller
+    control={form.control}
+    name="name"
+    render={({ field, fieldState }) => (
+      <Field data-invalid={fieldState.invalid}>
+        <FieldLabel htmlFor="name">Full Name</FieldLabel>
+        <Input {...field} id="name" aria-invalid={fieldState.invalid} />
+        {fieldState.error && <FieldError errors={[fieldState.error]} />}
+      </Field>
+    )}
+  />
+</FieldGroup>
+```
+
+This per-field `fieldState` from the `Controller` render prop is a natural fit
+for the "one read path per value" and "consume what you subscribed to" rules
+above — there's no separate `formState` destructure to drift out of sync,
+because the error for a field lives right next to its `field` in the same
+render prop.
+
 ## Reading values, by location
 
 - **In the component that owns `useForm`:** destructure `formState`; prefer
@@ -32,8 +92,8 @@ is ratcheted in Studio CI — any increase in the warning count fails the build.
   `watch`, and `useWatch` scopes the re-render if the JSX is later extracted).
 - **In any child component or custom hook:** accept `control` (not the whole
   `form`) and use `useWatch({ control, name })` / `useFormState({ control })`.
-  Inside `<Form {...form}>` (which _is_ `FormProvider`), `useFormContext()` +
-  `useWatch({ name })` also works and avoids prop-drilling entirely.
+  There's no `FormProvider`/context in this codebase's pattern, so `control`
+  must always be passed explicitly — don't reach for `useFormContext()`.
 - **Consume the return value.** Never call a watch for its subscription side
   effect and then read via `getValues()` — the watch list and the read list will
   drift apart (it has already happened; fields silently lost reactivity). The
@@ -65,10 +125,11 @@ function Fields({ control }: { control: Control<FormValues> }) {
 ## The canonical form
 
 zod schema → `z.infer` type → `useForm` with `zodResolver` and **complete**
-`defaultValues` → `<Form {...form}>` → `FormField` render-prop per field →
-`FormItemLayout` → `FormControl` → primitive from `ui`. Layout/container choices
-(Card vs Sheet, `layout=` variants) are covered by the `studio-ui-patterns` skill
-and the demos in `apps/design-system/registry/default/example/`
+`defaultValues` → `FieldGroup` + `Controller` + `Field`/`FieldLabel`/`FieldError`
+above → primitive from `ui`.
+Layout/container choices (Card vs Sheet, `layout=` variants) are covered by the
+`studio-ui-patterns` skill and the demos in
+`apps/design-system/registry/default/example/`
 (`form-patterns-pagelayout.tsx`, `form-patterns-sidepanel.tsx`) — check them
 before inventing structure.
 
@@ -92,21 +153,17 @@ const form = useForm<FormValues>({
   defaultValues,
 })
 
-<Form {...form}>
-  <form id={FORM_ID} onSubmit={form.handleSubmit(onSubmit)}>
-    <FormField
-      control={form.control}
-      name="name"
-      render={({ field }) => (
-        <FormItemLayout layout="horizontal" label="Name">
-          <FormControl>
-            <Input {...field} />
-          </FormControl>
-        </FormItemLayout>
-      )}
-    />
-  </form>
-</Form>
+<Controller
+  control={form.control}
+  name="name"
+  render={({ field, fieldState }) => (
+    <Field data-invalid={fieldState.invalid}>
+      <FieldLabel htmlFor="name">Name</FieldLabel>
+      <Input {...field} id="name" aria-invalid={fieldState.invalid} />
+      {fieldState.error && <FieldError errors={[fieldState.error]} />}
+    </Field>
+  )}
+/>
 ```
 
 Define the schema, `type`, static `defaultValues`, and the form's id at module
@@ -121,8 +178,13 @@ Submit buttons living outside the `<form>` (sheet/dialog footers) use the same
 module-level `FORM_ID` via `form={FORM_ID}` on the button. A module-level id is
 only safe for singleton forms — if the component can mount more than once at a
 time, duplicate ids make external buttons submit the first matching form, so
-mint a per-instance id with `useId()` and share it between the `<form>` and its
-buttons.
+mint a per-instance id with `useId()` (or an incoming `index`/`id` prop, as
+list-row dialogs already do) and share it between the `<form>` and its buttons.
+When a form/dialog is rendered once per list row, suffix every element's `id`
+and `data-testid` with that same per-instance key (e.g.
+`` `edit-faculty-name-${index}` ``) — this is required for e2e tests to target
+the right instance and should be treated as part of "the canonical form," not
+an optional extra.
 
 ## defaultValues, server data, and reset
 
@@ -156,6 +218,11 @@ buttons.
 - Cancel buttons call `form.reset()`. This only visually restores fields whose
   values round-trip through defined, controlled values — which is why the null
   rules below matter.
+- **Gate the submit button on `isDirty` in edit forms.** Where the form is
+  editing an existing record rather than creating a new one, disable Save while
+  `!form.formState.isDirty` (in addition to the mutation's `isPending`) so users
+  can't submit an unchanged record. Read `isDirty` via a destructured
+  `formState` in the owning component, per the destructuring rule below.
 
 ## Controlled inputs: never let `value` flip to `undefined`
 
@@ -214,6 +281,11 @@ schema, `onChange`, rendering, and the submit mapping.
 
 `onSubmit` receives validated, typed data — trust it; don't re-read via
 `getValues()`. Mutations follow Studio conventions: `onSuccess` → `toast.success`
+→ `reset(values)` (or query invalidation when using `values:`), `onError` →
+`toast.error`; pass the mutation's `isPending` to the button's `loading`/`disabled`
+prop, combined with `!form.formState.isDirty` for edit forms (see above). Default
+validation `mode: 'onSubmit'` is right for most forms — pick another mode
+deliberately, not by copying.
 
 - `reset(values)` (or query invalidation when using `values:`), `onError` →
   `toast.error`; pass the mutation's `isPending` to the button's `loading` prop.
