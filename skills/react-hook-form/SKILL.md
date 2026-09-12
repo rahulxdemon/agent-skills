@@ -149,7 +149,9 @@ function Fields({ control }: { control: Control<FormValues> }) {
 
 ## The canonical form
 
-zod schema → `z.infer` type → `useForm` with `zodResolver` and **complete**
+zod schema → `z.input` type (or `z.infer` if the schema has no coerced/
+transformed fields — see "Type `FormValues`" under Number inputs) → `useForm`
+with `zodResolver` and **complete**
 `defaultValues` → `FieldGroup` + `Controller` + `Field`/`FieldLabel`/`FieldError`
 above → primitive from `ui`.
 Layout/container choices (Card vs Sheet, `layout=` variants) are covered by the
@@ -173,7 +175,7 @@ const FormSchema = z.object({
     .union([
       z.literal(''),
       z.coerce
-        .number()
+        .number<number>()
         .gte(
           POOL_VALIDATION.MAX_CONNECTIONS_MIN,
           `Must be at least ${POOL_VALIDATION.MAX_CONNECTIONS_MIN}`,
@@ -181,7 +183,8 @@ const FormSchema = z.object({
     ])
     .refine((v) => v !== '', 'Max connections is required'),
 })
-type FormValues = z.infer<typeof FormSchema>
+// z.input, not z.infer — see "Typing coerced fields" below
+type FormValues = z.input<typeof FormSchema>
 
 const defaultValues: FormValues = { name: '', maxConnections: '' }
 
@@ -367,7 +370,7 @@ a bug, not a fix.
 
 The blessed pattern keeps `''` as the "empty" sentinel so the input stays
 controlled, and lets zod coerce on validation (see `maxConnections` above):
-`z.union([z.literal(''), z.coerce.number()...]).refine((v) => v !== '', '…')`
+`z.union([z.literal(''), z.coerce.number<number>()...]).refine((v) => v !== '', '…')`
 with a plain `<Input {...field} type="number" />`.
 
 If you instead wire `onChange` through `e.target.valueAsNumber` (or
@@ -378,6 +381,50 @@ field's schema declares** — with the `''`-union schema above:
 `field.onChange(Number.isNaN(e.target.valueAsNumber) ? '' : e.target.valueAsNumber)`.
 Never let `NaN` into form state.
 
+### Type coerced fields with `z.coerce.number<number>()`, not bare `z.coerce.number()`
+
+Always give `z.coerce.number()` an explicit type argument —
+`z.coerce.number<number>()`. Left bare inside a `z.union([...]).refine(...)`
+chain like the sentinel pattern above, TS can fail to narrow the coerced
+branch correctly and the field ends up mistyped or `unknown`. The generic
+makes the intended type explicit instead of relying on inference through the
+union/refine chain.
+
+### Type `FormValues` with `z.input`, not `z.infer`, whenever the schema coerces
+
+`z.infer<typeof Schema>` (an alias for `z.output`) is the shape _after_ zod has
+parsed and coerced the data — for the sentinel pattern above that's
+`{ age: number }`, never `''`. But the form itself holds pre-parse values: an
+empty text input is `''` until the resolver runs. Feeding `z.infer` into
+`useForm<FormValues>` makes `defaultValues: { age: '' }` and
+`field.onChange('')` type errors, because TypeScript believes `age` is always
+a `number`.
+
+Use `z.input<typeof Schema>` for `FormValues` (and for the `onSubmit` handler's
+parameter type) whenever any field in the schema is coerced, unioned with a
+sentinel, or otherwise transformed — i.e. whenever the raw, in-progress form
+value differs from the validated output value:
+
+```tsx
+const FormSchema = z.object({
+  age: z
+    .union([z.literal(""), z.coerce.number<number>().int().gte(0)])
+    .refine((v) => v !== "", "Age is required"),
+});
+
+// ✅ z.input — matches what the form actually holds before validation
+type FormValues = z.input<typeof FormSchema>;
+
+// ❌ z.infer/z.output — says `age: number`, breaks defaultValues: { age: '' }
+type FormValues = z.infer<typeof FormSchema>;
+```
+
+A schema with no coerced/transformed fields (plain strings, enums, booleans)
+has identical `input` and `output` shapes, so `z.infer` is still fine there —
+this rule only bites once coercion, `.transform()`, or a sentinel union enters
+the schema, which in practice means: default to `z.input` for any form that
+has a number field built on this skill's sentinel pattern.
+
 A nullable API field (`null` = "unset", e.g. a platform default applies)
 doesn't change the in-form sentinel — keep `''` inside the form and convert at
 the boundaries:
@@ -386,7 +433,7 @@ the boundaries:
 // inbound: null → '' when building defaults/values
 values: { growthPercent: data.growth_percent ?? '' },
 // schema: '' stays the in-form sentinel, zod coerces real input
-growthPercent: z.union([z.literal(''), z.coerce.number().gte(10).lte(100)]),
+growthPercent: z.union([z.literal(''), z.coerce.number<number>().gte(10).lte(100)]),
 // outbound: '' → null in onSubmit
 mutate({ growth_percent: values.growthPercent === '' ? null : values.growthPercent })
 ```
@@ -401,7 +448,15 @@ schema, `onChange`, rendering, and the submit mapping.
 ## Submit and mutations
 
 `onSubmit` receives validated, typed data — trust it; don't re-read via
-`getValues()`. Mutations follow Studio conventions: `onSuccess` → `toast.success`
+`getValues()`. When `FormValues` is typed with `z.input` (see Number inputs
+above), the `onSubmit` parameter is still typed as `z.input` — e.g.
+`age: '' | number` — even though the resolver has already run and the value is
+always a real `number` by the time your handler executes. This is a gap in the
+single-generic `useForm<FormValues>` signature, not a runtime bug: trust the
+value, but don't be surprised if TS still shows the sentinel type inside
+`onSubmit` and requires a narrow (`values.age === '' ? ... : ...`) or a type
+assertion before passing it somewhere that expects a plain `number`. Mutations
+follow Studio conventions: `onSuccess` → `toast.success`
 → `reset(values)` (or query invalidation when using `values:`), `onError` →
 `toast.error`; pass the mutation's `isPending` to the button's `loading`/`disabled`
 prop, combined with `!form.formState.isDirty` for edit forms (see above). Default
