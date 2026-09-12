@@ -64,19 +64,33 @@ off the render prop and is passed to `FieldError` explicitly, right next to the
 `field` it belongs to:
 
 ```tsx
-<FieldGroup>
-  <Controller
-    control={form.control}
-    name="name"
-    render={({ field, fieldState }) => (
-      <Field data-invalid={fieldState.invalid}>
-        <FieldLabel htmlFor="name">Full Name</FieldLabel>
-        <Input {...field} id="name" aria-invalid={fieldState.invalid} />
-        {fieldState.error && <FieldError errors={[fieldState.error]} />}
-      </Field>
-    )}
-  />
-</FieldGroup>
+function MyForm() {
+  const id = useId();
+  const form = useForm<FormValues>({
+    resolver: zodResolver(FormSchema),
+    defaultValues,
+  });
+
+  return (
+    <FieldGroup>
+      <Controller
+        control={form.control}
+        name="name"
+        render={({ field, fieldState }) => (
+          <Field data-invalid={fieldState.invalid}>
+            <FieldLabel htmlFor={`${id}-${field.name}`}>Full Name</FieldLabel>
+            <Input
+              {...field}
+              id={`${id}-${field.name}`}
+              aria-invalid={fieldState.invalid}
+            />
+            {fieldState.error && <FieldError errors={[fieldState.error]} />}
+          </Field>
+        )}
+      />
+    </FieldGroup>
+  );
+}
 ```
 
 This per-field `fieldState` from the `Controller` render prop is a natural fit
@@ -84,6 +98,17 @@ for the "one read path per value" and "consume what you subscribed to" rules
 above — there's no separate `formState` destructure to drift out of sync,
 because the error for a field lives right next to its `field` in the same
 render prop.
+
+**Always build `id`/`htmlFor` from `useId()` + `field.name` — never a bare
+string literal.** Call `useId()` once per form instance (not per field) and
+compose each field's id as `` `${id}-${field.name}` ``. `field.name` guarantees
+uniqueness across fields in the same form; `useId()` guarantees uniqueness
+across mounts of the _same_ form (two open edit dialogs, a repeated form in a
+list). A literal `id="name"` works until the form renders twice, at which point
+both instances share a DOM id, `htmlFor` starts pointing at whichever input
+rendered first, and clicking one label can focus the wrong field. This is the
+same class of bug the `FORM_ID` guidance below addresses, and can reuse the
+same `useId()` call.
 
 ## Reading values, by location
 
@@ -134,13 +159,26 @@ Layout/container choices (Card vs Sheet, `layout=` variants) are covered by the
 before inventing structure.
 
 ```tsx
+// data/validation-limits.ts — module level, exported, reused by schema + UI
+export const POOL_VALIDATION = {
+  MAX_CONNECTIONS_MIN: 1,
+} as const
+
 // Module level — static references, not recreated on every render
 const FORM_ID = 'pool-config-form'
 
 const FormSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   maxConnections: z
-    .union([z.literal(''), z.coerce.number().gte(1, 'Must be at least 1')])
+    .union([
+      z.literal(''),
+      z.coerce
+        .number()
+        .gte(
+          POOL_VALIDATION.MAX_CONNECTIONS_MIN,
+          `Must be at least ${POOL_VALIDATION.MAX_CONNECTIONS_MIN}`,
+        ),
+    ])
     .refine((v) => v !== '', 'Max connections is required'),
 })
 type FormValues = z.infer<typeof FormSchema>
@@ -148,6 +186,7 @@ type FormValues = z.infer<typeof FormSchema>
 const defaultValues: FormValues = { name: '', maxConnections: '' }
 
 // Inside the component
+const id = useId()
 const form = useForm<FormValues>({
   resolver: zodResolver(FormSchema),
   defaultValues,
@@ -158,8 +197,8 @@ const form = useForm<FormValues>({
   name="name"
   render={({ field, fieldState }) => (
     <Field data-invalid={fieldState.invalid}>
-      <FieldLabel htmlFor="name">Name</FieldLabel>
-      <Input {...field} id="name" aria-invalid={fieldState.invalid} />
+      <FieldLabel htmlFor={`${id}-${field.name}`}>Name</FieldLabel>
+      <Input {...field} id={`${id}-${field.name}`} aria-invalid={fieldState.invalid} />
       {fieldState.error && <FieldError errors={[fieldState.error]} />}
     </Field>
   )}
@@ -178,13 +217,74 @@ Submit buttons living outside the `<form>` (sheet/dialog footers) use the same
 module-level `FORM_ID` via `form={FORM_ID}` on the button. A module-level id is
 only safe for singleton forms — if the component can mount more than once at a
 time, duplicate ids make external buttons submit the first matching form, so
-mint a per-instance id with `useId()` (or an incoming `index`/`id` prop, as
-list-row dialogs already do) and share it between the `<form>` and its buttons.
-When a form/dialog is rendered once per list row, suffix every element's `id`
-and `data-testid` with that same per-instance key (e.g.
-`` `edit-faculty-name-${index}` ``) — this is required for e2e tests to target
-the right instance and should be treated as part of "the canonical form," not
-an optional extra.
+mint a per-instance id instead. Reuse the same `useId()` call from the field-id
+guidance above for this: `const id = useId()`, then the `<form>`'s own id is
+`id` (or `` `${id}-form` `` if you want it visually distinct) and each field's
+id is `` `${id}-${field.name}` `` — one call, no separate id scheme to keep in
+sync. When a form/dialog is rendered once per list row and you also need
+stable per-instance selectors for e2e tests, suffix `data-testid` with an
+incoming `index`/record-id prop instead (e.g.
+`` `edit-faculty-name-${index}` ``) — that's a testing concern, separate from
+`useId()`'s job of keeping `id`/`htmlFor` unique, and both can coexist on the
+same element.
+
+For the numeric literals inside a schema like `maxConnections` above, see
+**Validation limits: define once, reuse everywhere** below — don't let a bare
+number sit only inside `.gte()`/`.lte()`/`.min()`/`.max()`.
+
+## Validation limits: define once, reuse everywhere
+
+Numeric/length limits used in a zod schema (`min`, `max`, `gte`, `lte`, and
+similar) belong in a single exported `as const` object per feature — never as
+a bare number that appears twice: once inside the validator call and again,
+independently, inside its message string.
+
+```tsx
+// features/faculty/data/validation-limits.ts
+export const FACULTY_VALIDATION = {
+  NAME_MIN: 3,
+  NAME_MAX: 60,
+  DESIGNATION_MIN: 2,
+  DESIGNATION_MAX: 20,
+} as const;
+
+// schema
+const formSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(FACULTY_VALIDATION.NAME_MIN, {
+      message: `Name must be at least ${FACULTY_VALIDATION.NAME_MIN} characters`,
+    })
+    .max(FACULTY_VALIDATION.NAME_MAX, {
+      message: `Name must be at most ${FACULTY_VALIDATION.NAME_MAX} characters`,
+    }),
+  designation: z
+    .string()
+    .trim()
+    .min(FACULTY_VALIDATION.DESIGNATION_MIN, {
+      message: `Designation must be at least ${FACULTY_VALIDATION.DESIGNATION_MIN} characters`,
+    })
+    .max(FACULTY_VALIDATION.DESIGNATION_MAX, {
+      message: `Designation must be at most ${FACULTY_VALIDATION.DESIGNATION_MAX} characters`,
+    }),
+});
+```
+
+- One object per feature (or a shared one for a cross-feature limit),
+  colocated under that feature's `data/`/`types/` folder and **exported** —
+  not a `const` scoped to the file that owns the schema. Exporting it lets the
+  same numbers drive an input's `maxLength`, a character counter, or a
+  backend-parity check without a second copy of the limit appearing there too.
+- Name keys `SCREAMING_SNAKE_CASE`, suffixed `_MIN`/`_MAX` (or `_LENGTH`,
+  `_COUNT`, etc. for a single-sided limit).
+- **Interpolate the same constant into the message — never write the number
+  twice.** `min(3, 'must be at least 3 characters')` has the limit in two
+  places; change one during a later edit and the validator and the message the
+  user reads silently disagree.
+- Applies anywhere a schema encodes a business rule as a number: string
+  lengths, numeric ranges (`gte`/`lte`, as with `maxConnections` above), array
+  lengths (`.min(1, ...)` on a `useFieldArray`), and so on.
 
 ## defaultValues, server data, and reset
 
@@ -192,20 +292,41 @@ an optional extra.
   `isDirty`, `dirtyFields`, and Cancel-reset all compare against it; a missing or
   `undefined` default breaks all three, and `undefined` also makes React treat the
   input as uncontrolled (see below).
-- **Form populated from an API? Use the `values` option, not a hand-rolled
-  effect.** `values` reacts to the query resolving and resets the form for you;
-  computing `defaultValues` from a query that may not have loaded freezes whatever
-  happened to be in cache at mount. Add
-  `resetOptions: { keepDirtyValues: true }` when a background refetch must not
-  clobber the user's in-progress edits. `keepDirtyValues` preserves whatever is
-  in `formState.dirtyFields`; typed edits and `setValue(…, { shouldDirty: true })`
-  populate it regardless of subscriptions, but `useFieldArray` operations
-  (append/remove/move) only mark fields dirty while `dirtyFields` or `isDirty`
-  is subscribed — so a form that combines `keepDirtyValues` with a field array
-  must read one of them in the owner, or the next refetch will discard array
-  edits. (Good examples:
+- **Form populated from data the parent already has — a query, or a prop like an
+  already-fetched row object — use the `values` option, not a hand-rolled
+  `useEffect(() => form.reset(...), [deps])`.** `values` reacts automatically
+  whenever the referenced fields change and resets the form for you; a
+  `useEffect` that calls `reset()` is doing that job manually and worse — it
+  re-runs on whatever dependency array you wrote, is easy to under- or
+  over-specify (e.g. depending on `form.reset` instead of the source data), and
+  is exactly the anti-pattern this section exists to avoid, even when the source
+  is a prop (e.g. an edit-dialog opened with a specific record) rather than a
+  query directly:
+
+  ```tsx
+  // ❌ manual reset-on-prop-change — drop this
+  React.useEffect(() => {
+    form.reset({ name: faculty.name, designation: faculty.designation });
+  }, [faculty.name, faculty.designation, form.reset]);
+
+  // ✅ let RHF react to the prop itself
+  const form = useForm<FormValues>({
+    resolver: zodResolver(FormSchema),
+    values: { name: faculty.name, designation: faculty.designation },
+  });
+  ```
+
+  Add `resetOptions: { keepDirtyValues: true }` when a background refetch must
+  not clobber the user's in-progress edits. `keepDirtyValues` preserves whatever
+  is in `formState.dirtyFields`; typed edits and
+  `setValue(…, { shouldDirty: true })` populate it regardless of subscriptions,
+  but `useFieldArray` operations (append/remove/move) only mark fields dirty
+  while `dirtyFields` or `isDirty` is subscribed — so a form that combines
+  `keepDirtyValues` with a field array must read one of them in the owner, or
+  the next refetch will discard array edits. (Good examples:
   `components/interfaces/Settings/Database/ConnectionLogging.tsx`,
   `components/interfaces/Storage/EditBucketModal.tsx`.)
+
 - **After a successful mutation, re-baseline the form** in `onSuccess` so the
   saved state becomes the new baseline (`isDirty` returns to false, Cancel now
   reverts to the saved values). Prefer what the server actually persisted: if the
