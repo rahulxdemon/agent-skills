@@ -65,12 +65,128 @@ Elements rendered inside `.map()` would all share one `data-testid`, which break
 - Take the index from the map callback: `.map((item, index) => ...)`.
 - Include that index in the `data-testid`, for example `` `partner-${index}-name` ``.
 - **Do not** use `item.id` or any other property of the item. Those values are not predictable and break the testing team's scripts. The array index starts at 0, so testers can predict it.
-- Pass the index down to child components as a prop (`index`) so they can build their own ids. For child components that render further nested test ids or reusable pieces, pass a prefix prop such as `idPrefix={`partner-${index}`}`.
+- Pass the index down to child components as a prop (`index`) so they can build their own ids. For child components that render further nested test ids or reusable pieces, pass a prefix prop such as `idPrefix={`partner-${index}`}`. (For dialogs, sheets, and alert dialogs, only the trigger uses this prefix. See rule 6.)
 - For nested maps, use a distinct index name for each level (`index`, `adminIdx`) and include all of them: `` `partner-${index}-admin-${adminIdx}-name` ``.
 
 Keep `key` as it is for React's reconciliation (for example `key={partner.id}`). The index rule applies only to `data-testid`, not to `key`.
 
-### 6. Do not write tests or test docs
+### 6. Dialog, AlertDialog, and Sheet: index only on the trigger, not on the content
+
+Only one dialog, alert dialog, or sheet can be open at a time, and their content is mounted in the DOM only while open. This changes how uniqueness works:
+
+- **The trigger** (the button or element that opens the dialog/sheet) is always in the DOM, once per list item. It **must** be unique, so include the index: `` `partner-${index}-toggle-status-trigger` ``.
+- **Elements inside the content** do not _need_ the index, because only one dialog is open at a time. By default, give generic elements (title, description, form fields, confirm/cancel/submit buttons, error messages) plain feature-based ids such as `change-status-confirm-btn`. This keeps the testing team's scripts simpler.
+- **Exception, decided per feature:** keep the `idPrefix` on content elements that _identify which item the dialog belongs to_, such as the item's name or code shown in the dialog, and the content container when it helps. This lets the tester cross-verify that the dialog shows the same item as the card they clicked (for example, the partner name in the dialog matches `partner-${index}-name` on the card), proving the right dialog was triggered and not another one.
+- Use judgment per feature: generic controls are index-free, identifying elements may keep the prefix. When unsure, keep the prefix on the element that shows the item's identity and leave the rest index-free.
+- This applies to every dialog-like overlay (Dialog, AlertDialog, Sheet). It does not apply to regular inline content, which is always in the DOM and still follows the index rule in rule 5.
+
+Example: `PartnerCard` passes `idPrefix={`partner-${index}`}` to this dialog. The trigger uses the prefix. Inside `AlertDialogContent`, the generic elements (title, description, cancel, confirm) are index-free, while the content container and the partner name keep the prefix so the tester can cross-check the dialog's partner name against the card's `partner-${index}-name`.
+
+```tsx
+interface TogglePartnerStatusDialogProps {
+  idPrefix: string;
+  partner: Partner;
+}
+
+export function TogglePartnerStatusDialog({
+  idPrefix,
+  partner,
+}: TogglePartnerStatusDialogProps) {
+  const [open, setOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const isDeactivating = partner.is_active;
+  const nextStatus = isDeactivating ? "inactive" : "active";
+  const mutation = useMutation({
+    mutationFn: togglePartnerStatusApi,
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["super-admin", "partners", "all"],
+      });
+      toast.success(`${partner.name} is now ${nextStatus}`);
+      setOpen(false);
+    },
+    onError: (err: FetchError<JsonResponse>) => {
+      toast.error(
+        err?.data?.message ?? err.message ?? "Unable to update partner status",
+      );
+    },
+  });
+
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger asChild>
+        {/* Trigger is always in the DOM (once per partner), so it carries the index prefix */}
+        <Button
+          type="button"
+          size="icon-sm"
+          variant="ghost"
+          aria-label={`Change ${partner.name}'s status`}
+          title={`Change ${partner.name}'s status`}
+          data-testid={`${idPrefix}-change-status-btn`}
+        >
+          <UserRoundKey />
+        </Button>
+      </AlertDialogTrigger>
+      {/* Content is mounted only while open (one at a time). Generic elements are index-free; identifying elements (container, partner name) keep the prefix for cross-verification with the card */}
+      <AlertDialogContent
+        data-testid={`${idPrefix}-alert-dialog-content`}
+        data-current-partner-status={partner.is_active ? "active" : "inactive"}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle data-testid="change-status-alert-title">
+            {isDeactivating
+              ? "Pause partner access?"
+              : "Enable partner access?"}
+          </AlertDialogTitle>
+          <AlertDialogDescription data-testid="change-status-alert-description">
+            {isDeactivating ? (
+              <>
+                <span
+                  data-testid={`${idPrefix}-change-status-alert-partner-name`}
+                >
+                  {partner.name}
+                </span>{" "}
+                will become inactive immediately. You can reactivate the partner
+                at any time.
+              </>
+            ) : (
+              <>
+                <span
+                  data-testid={`${idPrefix}-change-status-alert-partner-name`}
+                >
+                  {partner.name}
+                </span>{" "}
+                will regain access to its assigned operations admins.
+              </>
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel
+            disabled={mutation.isPending}
+            data-testid="change-status-alert-cancel-btn"
+          >
+            Cancel
+          </AlertDialogCancel>
+          <SubmitButton
+            type="button"
+            variant={isDeactivating ? "destructive" : "default"}
+            onClick={() =>
+              mutation.mutate({ params: { partnerId: partner.id } })
+            }
+            isSubmitting={mutation.isPending}
+            data-testid="change-status-confirm-btn"
+          >
+            {isDeactivating ? "Pause Access" : "Enable Access"}
+          </SubmitButton>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+```
+
+### 7. Do not write tests or test docs
 
 Do not write test cases, test scripts, Playwright specs, test plans, or testing documentation. Only add the `data-testid` attributes. Do not suggest or generate tests unless the user explicitly asks in that conversation.
 
@@ -281,5 +397,6 @@ export function PartnerCard({ index, partner }: PartnerCardProps) {
 - No `id` attributes were added, and no existing `id` attributes (on form elements or anywhere else) were edited or removed. `useId` is not used.
 - Each `data-testid` is built from the feature and element purpose, and is unique on the page. It does not have to equal the element's existing `id`, and the `id` is left untouched.
 - Every `data-testid` inside a `.map()` includes the map index, never `item.id` or another property.
+- Dialog/AlertDialog/Sheet triggers include the list index. Inside their content, generic elements are index-free, while identifying elements (such as the item's name) may keep the prefix for cross-verification with the card.
 - The attribute sits on the innermost element holding the value, not on a parent wrapper.
 - No test files, test cases, or testing docs were created.
