@@ -15,9 +15,14 @@ Your only job here is to add the attribute. The testing team handles everything 
 
 Add `data-testid` to every element a tester would need to find, read, or interact with: inputs, buttons, links, headings, badges, status text, counts, error and empty states, dialogs, list items, and any element that displays a dynamic value.
 
-### 2. Never add the `id` attribute for testing
+### 2. Never add or edit `id` attributes
 
 Do not add `id` as a testing hook. Playwright supports `data-testid` natively and it is the standard. Do not add `id` because "some testing libraries might not support `data-testid`". Our testers use Playwright only.
+
+- **Do not add new `id` attributes** to any element, including form elements (`input`, `select`, `textarea`, `label` with `htmlFor`, and so on) and any other element.
+- **Do not edit, rename, or remove existing `id` attributes** on form elements or any other elements. Leave them exactly as they are, even if they look redundant or inconsistent. Other code (labels, ARIA attributes, CSS, scripts) may depend on them.
+- Add `data-testid` alongside whatever `id` is already there.
+- The `data-testid` does **not** need to match the existing `id`. If an element already has an `id`, write the `data-testid` as a better, feature-based version following the naming convention below, instead of copying the `id`. The two values are independent, but the `id` itself must never change.
 
 ### 3. Never use React's `useId` for uniqueness
 
@@ -273,8 +278,8 @@ export function PartnerCard({ index, partner }: PartnerCardProps) {
 ## Checklist before finishing
 
 - Every interactive or value-bearing element has a `data-testid`.
-- No `id` attributes were added for testing, and `useId` is not used.
-- Each `data-testid` is built from the feature and element purpose, and is unique on the page.
+- No `id` attributes were added, and no existing `id` attributes (on form elements or anywhere else) were edited or removed. `useId` is not used.
+- Each `data-testid` is built from the feature and element purpose, and is unique on the page. It does not have to equal the element's existing `id`, and the `id` is left untouched.
 - Every `data-testid` inside a `.map()` includes the map index, never `item.id` or another property.
 - The attribute sits on the innermost element holding the value, not on a parent wrapper.
 - No test files, test cases, or testing docs were created.
