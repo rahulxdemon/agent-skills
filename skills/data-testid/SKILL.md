@@ -13,7 +13,7 @@ Your only job here is to add the attribute. The testing team handles everything 
 
 ### 1. Add `data-testid` to the elements
 
-Add `data-testid` to every element a tester would need to find, read, or interact with: inputs, buttons, links, headings, badges, status text, counts, error and empty states, dialogs, list items, and any element that displays a dynamic value.
+Add `data-testid` to every element a tester would need to find, read, or interact with: inputs, form labels, buttons, links, headings, badges, status text, counts, error and empty states, dialogs, list items, and any element that displays a dynamic value.
 
 ### 2. Never add or edit `id` attributes
 
@@ -139,7 +139,43 @@ export function TogglePartnerStatusDialog({
 }
 ```
 
-### 7. Do not write tests or test docs
+### 7. Form labels need a `data-testid` too
+
+Every label of a form field gets its own `data-testid`: `<label>`, `FieldLabel`, or any label component, for inputs, selects, textareas, checkboxes, radios, and switches.
+
+**Why:** a label is associated with its input, so clicking the label focuses the input. The testing team prefers to click the label and then type, instead of clicking the input directly. They can only select the label if it has a `data-testid`.
+
+- Name it after the input it belongs to, with a `-label` suffix, so the label, input, and error line up: `edit-partner-name-label`, `edit-partner-name-input`, `edit-partner-name-error`.
+- Put the attribute directly on the label element (it already holds the text, so this satisfies rule 4).
+- Do not touch the existing `htmlFor` and `id` pairing on the label and input. Per rule 2, leave them exactly as they are.
+- Labels inside `.map()` follow rule 5 and include the index. Labels inside dialog or sheet content follow rule 6.
+
+```tsx
+<Field data-invalid={fieldState.invalid}>
+  {/* Label gets its own data-testid, named after the input it belongs to */}
+  <FieldLabel
+    htmlFor={`${id}-${field.name}`}
+    data-testid="edit-partner-name-label"
+  >
+    Partner name
+  </FieldLabel>
+  <Input
+    {...field}
+    id={`${id}-${field.name}`}
+    data-testid="edit-partner-name-input"
+  />
+  {fieldState.error && (
+    <FieldError
+      data-testid="edit-partner-name-error"
+      errors={[fieldState.error]}
+    />
+  )}
+</Field>
+```
+
+In the snippet, `htmlFor` and `id` are shown only because they already exist in the code. Never add or change them.
+
+### 8. Do not write tests or test docs
 
 Do not write test cases, test scripts, Playwright specs, test plans, or testing documentation. Only add the `data-testid` attributes. Do not suggest or generate tests unless the user explicitly asks in that conversation.
 
@@ -150,5 +186,6 @@ Do not write test cases, test scripts, Playwright specs, test plans, or testing 
 - Each `data-testid` is built from the feature and element purpose, and is unique on the page. It does not have to equal the element's existing `id`, and the `id` is left untouched.
 - Every `data-testid` inside a `.map()` includes the map index, never `item.id` or another property.
 - Dialog/AlertDialog/Sheet triggers include the list index. Inside their content, generic elements are index-free, while identifying elements (such as the item's name) may keep the prefix for cross-verification with the card.
+- Every form label has a `data-testid` named after its input (`...-label`), so testers can click the label to focus the input.
 - The attribute sits on the innermost element holding the value, not on a parent wrapper.
 - No test files, test cases, or testing docs were created.
