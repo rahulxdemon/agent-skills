@@ -85,6 +85,7 @@ Only include keys the endpoint actually uses. If the endpoint has none, drop `Ct
 - Build the schema from the response shape provided below the curl. If the file already exists, append; do not overwrite other schemas.
 - Naming: `<name>Schema` for schemas, PascalCase for types, with the top-level one named after the action (`getAllOperationsAdminUsersSchema` / `GetAllOperationsAdminUsers`). Export schemas and inferred types.
 - If the response shape is missing or ambiguous, say so and ask or flag it. Never invent fields.
+- If the response is empty (no data payload), skip this step: no schema, use `EmptyJsonResponse` (see "Empty responses" in Step 5).
 
 ```ts
 import { jsonResponseSchema } from "@scope/common/api-schema/json-response";
@@ -201,7 +202,41 @@ Rules:
 
 - Always set `method`. Pass `body: ctx.body` only if the endpoint has a body; pass `query: ctx.query` only if it has query params.
 - Plain async function, no `queryOptions`, no query key, no `useMutation`.
-- Responses with an empty/null payload still get a schema (e.g. `jsonResponseSchema(z.null())`), unless the user says the endpoint returns nothing at all.
+- Empty responses (no `data` payload, e.g. assign/delete endpoints) use the shared `EmptyJsonResponse` type, never `jsonResponseSchema(z.null())` or any other per-endpoint null schema. See "Empty responses" below.
+
+#### Empty responses
+
+The common package exports `EmptyJsonResponse` (the envelope `{ status, message, data: undefined }`). Only the type is exported, there is no schema to import. So for an endpoint with an empty response:
+
+- Use `EmptyJsonResponse` as the ofetch generic.
+- Do not create a zod schema for it and do not add an `onResponse` parse.
+- Import the type from the same shared json-response module the project already uses for `jsonResponseSchema` (do not redefine it).
+
+```ts
+import { superAdminV1Api } from "@/api/ofetch-api";
+import type { EmptyJsonResponse } from "@scope/common/api-schema/json-response";
+
+/**
+ * @curl
+ * curl --location --request POST 'https://<host>/v1/super-admin/institute/{institute_id}/faculty/{faculty_id}/assign' \
+ *   --header 'Cookie: <redacted>'
+ */
+
+interface Ctx {
+  params: { institute_id: string; faculty_id: string };
+}
+
+export const assignDeanInstituteApi = async (ctx: Ctx) => {
+  return await superAdminV1Api<EmptyJsonResponse>(
+    `/institute/${ctx.params.institute_id}/faculty/${ctx.params.faculty_id}/assign`,
+    {
+      method: "POST",
+    },
+  );
+};
+```
+
+This applies to options too if a GET ever returns an empty envelope.
 
 ## Step 6: Keep the curl as a comment (`@curl`)
 
@@ -227,6 +262,7 @@ Every framed options/api file carries the source curl as a block comment so the 
 - [ ] Right ofetch client (prefix + auth/public); path excludes version and client prefix
 - [ ] `Ctx` has only the keys the endpoint uses; no `body` in options
 - [ ] zod schema + inferred type exist; `onResponse` parses only when `response.ok`
+- [ ] Empty responses use `EmptyJsonResponse` (no schema, no `onResponse` parse, never `jsonResponseSchema(z.null())`)
 - [ ] Query key (options) includes `ctx` when present
 - [ ] `@curl` comment present, secrets redacted, method + path verbatim
 - [ ] No feature code written
