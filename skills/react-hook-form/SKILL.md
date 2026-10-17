@@ -2,13 +2,13 @@
 name: react-hook-form
 description:
   Correct React Hook Form usage anywhere in the monorepo — data flow, subscriptions,
-  reset, dirty state, number inputs, and controlled-input rules. Load this BEFORE
-  writing or modifying ANY form code, adding a field to an existing form, touching
-  watch/useWatch/formState/getValues/setValue/reset, wiring a form into a dialog or
-  sheet, or building a submit/cancel footer — even when the change looks trivial.
-  The codebase contains widespread RHF anti-patterns; without this skill you will
-  copy them. For form layout and which components to use, also load
-  studio-ui-patterns.
+  reset, dirty state, number inputs, controlled-input rules, and forms inside
+  dialogs/sheets. Load this BEFORE writing or modifying ANY form code, adding a
+  field to an existing form, touching watch/useWatch/formState/getValues/setValue/reset,
+  wiring a form into a dialog or sheet, or building a submit/cancel footer — even
+  when the change looks trivial. The codebase contains widespread RHF anti-patterns;
+  without this skill you will copy them. For form layout and which components to use,
+  also load studio-ui-patterns.
 ---
 
 # React Hook Form
@@ -23,8 +23,131 @@ this skill, not the neighboring file.
 existing form code, upgrade the specific fields/hooks/components you're editing to
 match (e.g. a component you touch that calls `form.watch` gets converted to
 `useWatch`). Leave untouched code alone, but tell the user about anti-patterns you
-noticed and didn't fix. Never add new violations: `react-hook-form/no-use-watch`
-is ratcheted in Studio CI — any increase in the warning count fails the build.
+noticed and didn't fix.
+
+## Forms in a dialog or sheet: always their own component
+
+**Any form rendered inside a `Dialog`, `Sheet`, `Drawer`, `Popover`, or similar
+overlay — create _and_ edit — lives in its own file/component, and `useForm` is
+called inside that component, never in the component that owns the overlay.**
+
+Why: the overlay's content unmounts when it closes. If `useForm` (and
+`useMutation`) live in a child component rendered _inside_ the content, closing
+the overlay destroys the form instance, so reopening it starts from a clean slate:
+no leftover typed values, validation errors, touched/dirty flags, or stale
+mutation error/pending state. If `useForm` lives in the overlay owner instead,
+that component stays mounted while the overlay is closed, and the half-typed
+state (or the previous submit's errors) is still there on reopen — Cancel,
+`onOpenChange`, and `reset()` calls scattered around to "clean up" are all
+symptoms of getting this wrong.
+
+Rules:
+
+- **Two files, colocated:** `<name>-form.tsx` (owns `useForm`, `useMutation`,
+  fields, the submit/cancel footer) and `<name>-button.tsx` / `<name>-dialog.tsx`
+  / `<name>-sheet.tsx` (owns only `open` state, the trigger, and the overlay
+  chrome — title, description).
+- **The overlay owner holds no form state.** No `useForm`, no `useWatch`, no
+  `reset()`, no `useEffect` that resets on `open` change. Its only form-related
+  job is passing `onSuccess` / `onCancel` callbacks that close the overlay.
+- **Render the form directly inside the overlay's content component**
+  (`DialogContent`, `SheetContent`, …), so it mounts on open and unmounts on
+  close. Don't hoist it above the content, and don't pass `forceMount` /
+  `keepMounted` (or any equivalent "keep children mounted" prop) on the content.
+- **Edit forms:** pass the record as a prop and feed it to `values:` inside the
+  form component (see "defaultValues, server data, and reset"). Because the form
+  remounts on every open, it re-initializes from the latest record each time —
+  no reset-on-open effect needed.
+- **Put the submit/cancel footer inside the form component**, not in the
+  overlay owner. That keeps `isDirty`, `isPending`, and the submit handler next
+  to the `useForm` call, and avoids the `form={FORM_ID}` external-button
+  workaround entirely. Only fall back to `form={id}` when the design system's
+  overlay component forces the footer outside the content slot — and then the
+  form must still be mounted inside the content.
+- **If the overlay implementation keeps its children mounted** while closed
+  (a custom wrapper, `forceMount`, an always-rendered side panel that is only
+  hidden with CSS), remount the form explicitly with a `key` that changes on
+  open — e.g. an `openCount`/`formKey` bumped in `onOpenChange`. Prefer fixing
+  the wrapper to unmount; use `key` only as a last resort.
+
+```tsx
+// ❌ useForm in the overlay owner — state survives close/reopen
+export function EditPartnerButton({ partner }: Props) {
+  const [open, setOpen] = useState(false);
+  const form = useForm<FormValues>({
+    resolver: zodResolver(FormSchema),
+    values: toValues(partner),
+  });
+  //    ^ this component stays mounted while the dialog is closed
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent>
+        <Controller control={form.control} name="name" render={/* … */} />
+      </DialogContent>
+    </Dialog>
+  );
+}
+```
+
+```tsx
+// ✅ edit-partner-button.tsx — owns only open state + overlay chrome
+export function EditPartnerButton({
+  idPrefix,
+  partner,
+  trigger,
+}: EditPartnerButtonProps) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>{trigger ?? <Button /* … */ />}</DialogTrigger>
+      <DialogContent data-testid={`${idPrefix}-edit-dialog-content`}>
+        <DialogHeader>
+          <DialogTitle>Edit partner details</DialogTitle>
+          <DialogDescription>
+            Update details for {partner.name}.
+          </DialogDescription>
+        </DialogHeader>
+        {/* mounts on open, unmounts on close → fresh form every time */}
+        <EditPartnerForm
+          partner={partner}
+          onSuccess={() => setOpen(false)}
+          onCancel={() => setOpen(false)}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ✅ edit-partner-form.tsx — owns useForm, useMutation, fields, footer
+export function EditPartnerForm({
+  partner,
+  onSuccess,
+  onCancel,
+}: EditPartnerFormProps) {
+  const id = useId();
+  const form = useForm<FormValues>({
+    resolver: zodResolver(FormSchema),
+    defaultValues,
+    values: toValues(partner),
+  });
+  const { isDirty } = form.formState;
+  // …useMutation, fields, Cancel / Save footer
+}
+```
+
+The same applies to **create** forms: `CreatePartnerDialog` owns `open` and the
+trigger, `CreatePartnerForm` owns `useForm` with static `defaultValues`. Closing
+and reopening yields an empty form with no stale errors.
+
+Note that `onSuccess` / `onCancel` only close the overlay — they don't call
+`form.reset()`. Unmounting already discards the form, so a reset-on-close is
+redundant. (Re-baselining with `reset(response)` after a successful save, per the
+section below, is still correct for forms that stay open after saving.)
+
+When touching an existing dialog/sheet that calls `useForm` in the overlay owner,
+extract the form into its own file as part of the change (per the fix-what-you-touch
+policy).
 
 ## Always wire fields with `Controller` — never bare `register`, never `FormField`
 
@@ -158,7 +281,8 @@ Layout/container choices (Card vs Sheet, `layout=` variants) are covered by the
 `studio-ui-patterns` skill and the demos in
 `apps/design-system/registry/default/example/`
 (`form-patterns-pagelayout.tsx`, `form-patterns-sidepanel.tsx`) — check them
-before inventing structure.
+before inventing structure. If the form is shown in a dialog or sheet, it is its
+own component in its own file (see "Forms in a dialog or sheet" above).
 
 ```tsx
 // data/validation-limits.ts — module level, exported, reused by schema + UI
@@ -217,7 +341,9 @@ feed server-driven defaults through the `values` option (next section) instead
 of hoisting.
 
 Submit buttons living outside the `<form>` (sheet/dialog footers) use the same
-module-level `FORM_ID` via `form={FORM_ID}` on the button. A module-level id is
+module-level `FORM_ID` via `form={FORM_ID}` on the button. Prefer putting the
+footer inside the form component instead (see "Forms in a dialog or sheet"), which
+makes this unnecessary. A module-level id is
 only safe for singleton forms — if the component can mount more than once at a
 time, duplicate ids make external buttons submit the first matching form, so
 mint a per-instance id instead. Reuse the same `useId()` call from the field-id
@@ -326,9 +452,7 @@ const formSchema = z.object({
   but `useFieldArray` operations (append/remove/move) only mark fields dirty
   while `dirtyFields` or `isDirty` is subscribed — so a form that combines
   `keepDirtyValues` with a field array must read one of them in the owner, or
-  the next refetch will discard array edits. (Good examples:
-  `components/interfaces/Settings/Database/ConnectionLogging.tsx`,
-  `components/interfaces/Storage/EditBucketModal.tsx`.)
+  the next refetch will discard array edits.
 
 - **After a successful mutation, re-baseline the form** in `onSuccess` so the
   saved state becomes the new baseline (`isDirty` returns to false, Cancel now
@@ -338,10 +462,13 @@ const formSchema = z.object({
   `reset(submittedValues)` is the fallback for APIs that store exactly what was
   sent — if the server normalizes or fills values, it baselines the form to data
   that was never saved. A bare `reset()` reverts to the _previous_ defaults —
-  wrong after a save.
-- Cancel buttons call `form.reset()`. This only visually restores fields whose
-  values round-trip through defined, controlled values — which is why the null
-  rules below matter.
+  wrong after a save. (Forms in a dialog/sheet that close on success don't need
+  this — the form unmounts; see "Forms in a dialog or sheet".)
+- Cancel buttons call `form.reset()` in forms that stay mounted (page forms,
+  inline cards). In a dialog/sheet form, Cancel just closes the overlay — the
+  form unmounts and the next open starts fresh. A page-form Cancel only visually
+  restores fields whose values round-trip through defined, controlled values —
+  which is why the null rules below matter.
 - **Gate the submit button on `isDirty` in edit forms.** Where the form is
   editing an existing record rather than creating a new one, disable Save while
   `!form.formState.isDirty` (in addition to the mutation's `isPending`) so users
@@ -459,7 +586,9 @@ assertion before passing it somewhere that expects a plain `number`. Mutations
 follow Studio conventions: `onSuccess` → `toast.success`
 → `reset(values)` (or query invalidation when using `values:`), `onError` →
 `toast.error`; pass the mutation's `isPending` to the button's `loading`/`disabled`
-prop, combined with `!form.formState.isDirty` for edit forms (see above). Default
+prop, combined with `!form.formState.isDirty` for edit forms (see above). In a
+dialog/sheet form, `onSuccess` calls the `onSuccess` prop to close the overlay
+instead of resetting. Default
 validation `mode: 'onSubmit'` is right for most forms — pick another mode
 deliberately, not by copying.
 
